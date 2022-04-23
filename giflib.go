@@ -2,10 +2,10 @@ package gocv
 
 /*
 #include <stddef.h>
+#include <string.h>
 #include "giflib.h"
 */
 import "C"
-
 import (
 	"bytes"
 	"errors"
@@ -91,6 +91,14 @@ type Framebuffer struct {
 	duration  time.Duration
 }
 
+// NewFramebuffer creates the backing store for a pixel frame buffer.
+func NewFramebuffer(width, height int) *Framebuffer {
+	return &Framebuffer{
+		buf: make([]byte, width*height*4),
+		mat: nil,
+	}
+}
+
 // Width returns the width of the contained pixel data in number of pixels. This may
 // differ from the capacity of the framebuffer.
 func (f *Framebuffer) Width() int {
@@ -101,6 +109,24 @@ func (f *Framebuffer) Width() int {
 // differ from the capacity of the framebuffer.
 func (f *Framebuffer) Height() int {
 	return f.height
+}
+
+// Duration returns the length of time this frame plays out in an animated image
+func (f *Framebuffer) Duration() time.Duration {
+	return f.duration
+}
+
+// Close releases the resources associated with Framebuffer.
+func (f *Framebuffer) Close() {
+	if f.mat != nil {
+		C.opencv_mat_release(f.mat)
+		f.mat = nil
+	}
+}
+
+// Clear resets all of the pixel data in Framebuffer.
+func (f *Framebuffer) Clear() {
+	C.memset(unsafe.Pointer(&f.buf[0]), 0, C.size_t(len(f.buf)))
 }
 
 func (f *Framebuffer) resizeMat(width, height int, pixelType PixelType) error {
@@ -122,7 +148,78 @@ func (f *Framebuffer) resizeMat(width, height int, pixelType PixelType) error {
 	return nil
 }
 
-type Decoder interface {
+func (f *Framebuffer) Fit(width, height int, dst *Framebuffer) error {
+	if f.mat == nil {
+		return ErrFrameBufNoPixels
+	}
+
+	aspectIn := float64(f.width) / float64(f.height)
+	aspectOut := float64(width) / float64(height)
+
+	var widthPostCrop, heightPostCrop int
+	if aspectIn > aspectOut {
+		// input is wider than output, so we'll need to narrow
+		// we preserve input height and reduce width
+		widthPostCrop = int((aspectOut * float64(f.height)) + 0.5)
+		heightPostCrop = f.height
+	} else {
+		// input is taller than output, so we'll need to shrink
+		heightPostCrop = int((float64(f.width) / aspectOut) + 0.5)
+		widthPostCrop = f.width
+	}
+
+	if widthPostCrop < 1 {
+		widthPostCrop = 1
+	}
+
+	if heightPostCrop < 1 {
+		heightPostCrop = 1
+	}
+
+	var left, top int
+	left = int(float64(f.width-widthPostCrop) * 0.5)
+	if left < 0 {
+		left = 0
+	}
+
+	top = int(float64(f.height-heightPostCrop) * 0.5)
+	if top < 0 {
+		top = 0
+	}
+
+	newMat := C.opencv_mat_crop(f.mat, C.int(left), C.int(top), C.int(widthPostCrop), C.int(heightPostCrop))
+	defer C.opencv_mat_release(newMat)
+
+	err := dst.resizeMat(width, height, f.pixelType)
+	if err != nil {
+		return err
+	}
+	C.opencv_mat_resize(newMat, dst.mat, C.int(width), C.int(height), C.int(InterpolationArea))
+	return nil
+}
+
+// ResizeTo performs a resizing transform on the Framebuffer and puts the result
+// in the provided destination Framebuffer. This function does not preserve aspect
+// ratio if the given dimensions differ in ratio from the source. Returns an error
+// if the destination is not large enough to hold the given dimensions.
+func (f *Framebuffer) ResizeTo(width, height int, dst *Framebuffer) error {
+	if width < 1 {
+		width = 1
+	}
+
+	if height < 1 {
+		height = 1
+	}
+
+	err := dst.resizeMat(width, height, f.pixelType)
+	if err != nil {
+		return err
+	}
+	C.opencv_mat_resize(f.mat, dst.mat, C.int(width), C.int(height), C.int(InterpolationArea))
+	return nil
+}
+
+type GifDecoder interface {
 	// Header returns basic image metadata from the image.
 	// This is done lazily, reading only the first part of the image and not
 	// a full decode.
@@ -149,8 +246,8 @@ type Decoder interface {
 }
 
 // An Encoder compresses raw pixel data into a well-known image type.
-type Encoder interface {
-	// Encode encodes the pixel data in f into the dst provided to NewEncoder. Encode quality
+type GifEncoder interface {
+	// Encode encodes the pixel data in f into the dst provided to NewGifEncoder. Encode quality
 	// options can be passed into opt, such as map[int]int{lilliput.JpegQuality: 80}
 	Encode(f *Framebuffer, opt map[int]int) ([]byte, error)
 
@@ -171,10 +268,10 @@ func isMP4(maybeMP4 []byte) bool {
 	return bytes.HasPrefix(magic, mp42Magic) || bytes.HasPrefix(magic, mp4IsomMagic)
 }
 
-// NewDecoder returns a Decoder which can be used to decode
+// NewGifDecoder returns a Decoder which can be used to decode
 // image data provided in buf. If the first few bytes of buf do not
 // point to a valid magic string, an error will be returned.
-func NewDecoder(buf []byte) (Decoder, error) {
+func NewGifDecoder(buf []byte) (GifDecoder, error) {
 	// Check buffer length before accessing it
 	if len(buf) == 0 {
 		return nil, ErrInvalidImage
@@ -183,11 +280,11 @@ func NewDecoder(buf []byte) (Decoder, error) {
 	return newGifDecoder(buf)
 }
 
-// NewEncoder returns an Encode which can be used to encode Framebuffer
+// NewGifEncoder returns an Encode which can be used to encode Framebuffer
 // into compressed image data. ext should be a string like ".jpeg" or
 // ".png". decodedBy is optional and can be the Decoder used to make
 // the Framebuffer. dst is where an encoded image will be written.
-func NewEncoder(ext string, decodedBy Decoder, dst []byte) (Encoder, error) {
+func NewGifEncoder(ext string, decodedBy GifDecoder, dst []byte) (GifEncoder, error) {
 	return newGifEncoder(decodedBy, dst)
 }
 
@@ -325,7 +422,7 @@ func (d *gifDecoder) SkipFrame() error {
 	return nil
 }
 
-func newGifEncoder(decodedBy Decoder, buf []byte) (*gifEncoder, error) {
+func newGifEncoder(decodedBy GifDecoder, buf []byte) (*gifEncoder, error) {
 	// we must have a decoder since we can't build our own palettes
 	// so if we don't get a gif decoder, bail out
 	if decodedBy == nil {
