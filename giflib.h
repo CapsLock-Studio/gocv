@@ -23,6 +23,12 @@ typedef void* opencv_decoder;
 typedef void* opencv_encoder;
 
 opencv_mat opencv_mat_create_from_data(int width, int height, int type, void* data, size_t data_len);
+opencv_mat opencv_mat_crop(const opencv_mat src, int x, int y, int width, int height);
+void opencv_mat_resize(const opencv_mat src,
+                       opencv_mat dst,
+                       int width,
+                       int height,
+                       int interpolation);
 void opencv_mat_release(opencv_mat mat);
 int opencv_type_depth(int type);
 int opencv_type_convert_depth(int type, int depth);

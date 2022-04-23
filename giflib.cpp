@@ -77,6 +77,27 @@ opencv_mat opencv_mat_create_from_data(int width, int height, int type, void* da
     return mat;
 }
 
+opencv_mat opencv_mat_crop(const opencv_mat src, int x, int y, int width, int height)
+{
+    auto ret = new cv::Mat;
+    *ret = (*static_cast<const cv::Mat*>(src))(cv::Rect(x, y, width, height));
+    return ret;
+}
+
+void opencv_mat_resize(const opencv_mat src,
+                       opencv_mat dst,
+                       int width,
+                       int height,
+                       int interpolation)
+{
+    cv::resize(*static_cast<const cv::Mat*>(src),
+               *static_cast<cv::Mat*>(dst),
+               cv::Size(width, height),
+               0,
+               0,
+               interpolation);
+}
+
 void opencv_mat_release(opencv_mat mat)
 {
     auto m = static_cast<cv::Mat*>(mat);
